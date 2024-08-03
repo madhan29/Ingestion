@@ -1,6 +1,6 @@
 import time
-import random
 import snappy
+import sqlite3
 from prometheus_pb2 import WriteRequest, TimeSeries, Label, Sample
 import requests
 
@@ -12,7 +12,15 @@ def create_sample(metric_name, server, id, timestamp, value):
     ts.samples.add(value=value, timestamp=timestamp)
     return ts
 
-def generate_and_push_metrics():
+def fetch_metrics_from_db(last_timestamp):
+    conn = sqlite3.connect('metrics.db')
+    c = conn.cursor()
+    c.execute("SELECT timestamp, metric, server, id, value FROM metrics WHERE timestamp > ? ORDER BY timestamp ASC", (last_timestamp,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def push_to_prometheus(metrics):
     url = "http://localhost:9090/api/v1/write"
     headers = {
         'Content-Type': 'application/x-protobuf',
@@ -20,28 +28,28 @@ def generate_and_push_metrics():
     }
 
     try:
-        while True:
-            base_timestamp = int(time.time() * 1000)  # Convert to milliseconds
-            metrics = WriteRequest()
-            for i in range(10):  # Generate 10 metrics for testing
-                metric_name = random.choice(["store", "state"])
-                server = f"server-{random.randint(1, 10)}"
-                id = f"id-{random.randint(1, 100)}"
-                value = random.uniform(0, 100)
-                timestamp = base_timestamp + i  # Ensure strictly increasing timestamps
-                metrics.timeseries.extend([create_sample(metric_name, server, id, timestamp, value)])
-
-            compressed_data = snappy.compress(metrics.SerializeToString())
-            response = requests.post(url, data=compressed_data, headers=headers)
-            response.raise_for_status()
-            print(f"Successfully pushed data to Prometheus: {response.status_code}")
-
-            time.sleep(5)  # Wait for 5 seconds before generating the next set of metrics
-
+        compressed_data = snappy.compress(metrics.SerializeToString())
+        response = requests.post(url, data=compressed_data, headers=headers)
+        response.raise_for_status()
+        print(f"Successfully pushed data to Prometheus: {response.status_code}")
     except requests.exceptions.RequestException as e:
         print(f"Error pushing data to Prometheus: {e}")
         if response.content:
             print("Response content:", response.content)
+
+def generate_and_push_metrics():
+    last_timestamp = 0  # Start with the earliest possible timestamp
+    try:
+        while True:
+            rows = fetch_metrics_from_db(last_timestamp)
+            if rows:
+                metrics = WriteRequest()
+                for row in rows:
+                    timestamp, metric_name, server, id, value = row
+                    metrics.timeseries.extend([create_sample(metric_name, server, id, timestamp, value)])
+                push_to_prometheus(metrics)
+                last_timestamp = rows[-1][0]  # Update the last timestamp to the most recent one
+            time.sleep(5)  # Wait for 5 seconds before fetching the next set of metrics
 
     except KeyboardInterrupt:
         print("Metric generation stopped.")
